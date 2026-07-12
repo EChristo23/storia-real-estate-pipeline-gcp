@@ -10,4 +10,6 @@ dependencies = [
     "h2>=4.3.0",
     "httpx>=0.28.1",
     "lxml>=6.0.2",
+    "pyarrow>=24.0.0",
+    "python-dotenv>=1.2.2",
 ]

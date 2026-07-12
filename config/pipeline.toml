@@ -1,0 +1,16 @@
+[scraping]
+# Property types to scrape. Available values:
+#   casa       → houses
+#   apartament → apartments
+#   teren      → land
+#   garsoniera → studios
+#   vila       → villas
+property_types = ["apartament", "casa"]
+
+# Maximum pages to scrape per property type. Omit to scrape all pages.
+# Each page contains up to 72 listings.
+# n_pages = 10
+
+# GCS bucket where raw JSON pages are written.
+# Blob path: {type}/{YYYY-MM-DD}/{YYYY-MM-DD}_{page}.json
+raw_bucket = "raw_real_estate"

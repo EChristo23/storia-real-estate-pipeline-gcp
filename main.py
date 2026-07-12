@@ -1,6 +1,100 @@
-def main():
-    print("Hello from storia-real-estate-pipeline-gcp!")
+import argparse
+import asyncio
+import json
+import logging
+import os
+import sys
+from logging.handlers import TimedRotatingFileHandler
+from pathlib import Path
+
+from dotenv import load_dotenv
+
+from src.ingestion.scraper import Scrapper, DetailScraper
+from src import config
+
+load_dotenv()
+
+
+def _setup_logging():
+    class JsonFormatter(logging.Formatter):
+        def format(self, record):
+            return json.dumps({
+                "severity": record.levelname,
+                "message": record.getMessage(),
+                "logger": record.name,
+                "timestamp": self.formatTime(record, "%Y-%m-%dT%H:%M:%S"),
+            })
+
+    handlers = []
+
+    # stdout — JSON for Cloud Run / Cloud Logging
+    stdout_handler = logging.StreamHandler(sys.stdout)
+    stdout_handler.setFormatter(JsonFormatter())
+    handlers.append(stdout_handler)
+
+    # file — plain text, only when LOG_DIR is set (local dev)
+    log_dir = os.getenv("LOG_DIR")
+    if log_dir:
+        Path(log_dir).mkdir(parents=True, exist_ok=True)
+        file_handler = TimedRotatingFileHandler(
+            filename=Path(log_dir) / "scraper.log",
+            when="midnight",
+            backupCount=7,
+            encoding="utf-8",
+        )
+        file_handler.setFormatter(logging.Formatter(
+            fmt="%(asctime)s %(levelname)-8s %(name)s — %(message)s",
+            datefmt="%Y-%m-%d %H:%M:%S",
+        ))
+        handlers.append(file_handler)
+
+    logging.basicConfig(level=logging.INFO, handlers=handlers)
+
+
+async def run_scraper(prop_type: str, n_pages: int, bucket_name: str):
+    logger = logging.getLogger(__name__)
+    scraper = Scrapper(type=prop_type, n_pages=n_pages)
+    logger.info(f"Starting scraper for '{prop_type}'")
+    scraper.setup()
+    if not scraper.build_id:
+        logger.critical(f"Setup failed for '{prop_type}' — no build_id, aborting")
+        return
+    logger.info(f"Setup complete — build_id={scraper.build_id}, pages={scraper.n_pages}")
+    results = await scraper.scrape(bucket_name=bucket_name)
+    logger.info(f"Scrape complete — {len(results)}/{scraper.n_pages} pages fetched")
+
+
+async def run_detail_scraper(prop_type: str, bucket_name: str):
+    logger = logging.getLogger(__name__)
+    scraper = DetailScraper(type=prop_type)
+    logger.info(f"Starting detail scraper for '{prop_type}'")
+    scraper.setup()
+    if not scraper.build_id:
+        logger.critical(f"Detail scraper setup failed for '{prop_type}' — no build_id, aborting")
+        return
+    logger.info(f"Detail scraper setup complete — build_id={scraper.build_id}, date={scraper.date}")
+    results = await scraper.enrich(bucket_name=bucket_name)
+    logger.info(f"Enrichment complete — {len(results)} listings fetched for '{prop_type}'")
+
+
+async def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--stage", type=int, choices=[1, 2], help="Run only stage 1 or stage 2 (default: both)")
+    args = parser.parse_args()
+
+    _setup_logging()
+    cfg = config.load()
+    n_pages = cfg["scraping"].get("n_pages")
+    bucket_name = cfg["scraping"]["raw_bucket"]
+
+    if not args.stage or args.stage == 1:
+        for prop_type in cfg["scraping"]["property_types"]:
+            await run_scraper(prop_type, n_pages=n_pages, bucket_name=bucket_name)
+
+    if not args.stage or args.stage == 2:
+        for prop_type in cfg["scraping"]["property_types"]:
+            await run_detail_scraper(prop_type, bucket_name=bucket_name)
 
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())
