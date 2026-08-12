@@ -5,12 +5,22 @@
 #   teren      → land
 #   garsoniera → studios
 #   vila       → villas
-property_types = ["apartament", "casa"]
-
+property_types = ["casa"]
+base_url = 'https://www.storia.ro'
 # Maximum pages to scrape per property type. Omit to scrape all pages.
 # Each page contains up to 72 listings.
 # n_pages = 10
 
+[gcs]
 # GCS bucket where raw JSON pages are written.
 # Blob path: {type}/{YYYY-MM-DD}/{YYYY-MM-DD}_{page}.json
+project = 'real-estate-465112'
 raw_bucket = "raw_real_estate"
+
+[bigquery]
+# Bigquery project, dataset and watermark table
+project = 'real-estate-465112'
+dataset = 'standardized'
+watermark_table = 'watermark'
+listings_table = 'listings'
+contacts_table = 'contacts'

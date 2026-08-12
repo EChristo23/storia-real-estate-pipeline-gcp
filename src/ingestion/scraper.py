@@ -3,7 +3,7 @@ import asyncio
 import json
 import logging
 import random
-from datetime import datetime
+from datetime import UTC, datetime
 
 import httpx
 from bs4 import BeautifulSoup
@@ -25,11 +25,12 @@ _CONCURRENCY = 5
 
 
 class Scrapper:
-    def __init__(self, type="casa", n_pages=None):
+    def __init__(self, type="casa", n_pages=None, base_url=None):
         self.type = type
         self.build_id = None
         self.n_pages = n_pages
         self.semaphore = asyncio.Semaphore(_CONCURRENCY)
+        self.base_url = base_url  # Will be set in setup()
 
     def _headers(self) -> dict:
         return {
@@ -42,7 +43,7 @@ class Scrapper:
         try:
             with httpx.Client(http2=True) as client:
                 response = client.get(
-                    f"https://www.storia.ro/ro/rezultate/vanzare/{self.type}/toata-romania?crawl=true&limit=72&view=map",
+                    f"{self.base_url}/ro/rezultate/vanzare/{self.type}/toata-romania?crawl=true&limit=72&view=map",
                     headers=self._headers(),
                 )
                 response.raise_for_status()
@@ -62,7 +63,7 @@ class Scrapper:
 
     def _write_page(self, bucket: storage.Bucket, page: int, data: dict) -> None:
         '''Write the scraped data for a page to Google Cloud Storage.'''
-        date_str = datetime.now().strftime("%Y-%m-%d")
+        date_str = datetime.now(tz=UTC).strftime("%Y-%m-%d")
         blob_name = f"{self.type}/{date_str}/{date_str}_{page}.json"
         blob = bucket.blob(blob_name)
         blob.upload_from_string(json.dumps(data, ensure_ascii=False), content_type="application/json")
@@ -71,7 +72,7 @@ class Scrapper:
     async def _fetch_page(self, client: httpx.AsyncClient, bucket: storage.Bucket, page: int) -> dict | None:
         '''Fetch a single page of listings asynchronously and write it to GCS with retries and exponential backoff.'''
         url = (
-            f"https://www.storia.ro/_next/data/{self.build_id}/ro/rezultate/vanzare/"
+            f"{self.base_url}/_next/data/{self.build_id}/ro/rezultate/vanzare/"
             f"{self.type}/toata-romania.json?crawl=true&limit=72"
             f"&searchingCriteria=vanzare&searchingCriteria={self.type}"
             f"&searchingCriteria=toata-romania&page={page}"
@@ -99,7 +100,7 @@ class Scrapper:
 
     def _write_manifest(self, bucket: storage.Bucket, fetched: list[int], failed: list[int], listings_count: int) -> None:
         '''Write a manifest file summarizing the scraping results to GCS.'''
-        date_str = datetime.now().strftime("%Y-%m-%d")
+        date_str = datetime.now(tz=UTC).strftime("%Y-%m-%d")
         blob_name = f"{self.type}/{date_str}/manifest.json"
         manifest = {
             "date": date_str,
@@ -126,7 +127,7 @@ class Scrapper:
                 lid = str(item["id"])
                 if lid not in summary:
                     summary[lid] = item.get("pushedUpAt")
-        date_str = datetime.now().strftime("%Y-%m-%d")
+        date_str = datetime.now(tz=UTC).strftime("%Y-%m-%d")
         blob_name = f"{self.type}/{date_str}/listing_summary.json"
         bucket.blob(blob_name).upload_from_string(
             json.dumps(summary, ensure_ascii=False), content_type="application/json"
@@ -160,12 +161,13 @@ _DETAIL_CONCURRENCY = 5
 
 
 class DetailScraper:
-    def __init__(self, type: str = "casa", date: str | None = None):
+    def __init__(self, type: str = "casa", date: str | None = None, base_url: str | None = None):
         self.type = type
-        self.date = date or datetime.now().strftime("%Y-%m-%d")
+        self.date = date or datetime.now(tz=UTC).strftime("%Y-%m-%d")
         self.build_id = None
         self.semaphore = asyncio.Semaphore(_DETAIL_CONCURRENCY)
         self._bucket_name: str | None = None
+        self.base_url = base_url
         self._gcs_client: storage.Client | None = None
 
     def _headers(self) -> dict:
@@ -178,7 +180,7 @@ class DetailScraper:
         try:
             with httpx.Client(http2=True) as client:
                 response = client.get(
-                    f"https://www.storia.ro/ro/rezultate/vanzare/{self.type}/toata-romania?crawl=true&limit=72&view=map",
+                    f"{self.base_url}/ro/rezultate/vanzare/{self.type}/toata-romania?crawl=true&limit=72&view=map",
                     headers=self._headers(),
                 )
                 response.raise_for_status()
@@ -265,7 +267,7 @@ class DetailScraper:
                     dates.append(date)
         if not dates:
             return None
-        prev_date = sorted(dates)[-1]
+        prev_date = max(dates)
         try:
             data = json.loads(bucket.blob(f"{self.type}/{prev_date}/listing_summary.json").download_as_text())
             result = {int(k): v for k, v in data.items()}
@@ -313,7 +315,7 @@ class DetailScraper:
             build_id_refreshed = False
             for attempt in range(_MAX_RETRIES):
                 try:
-                    url = f"https://www.storia.ro/_next/data/{self.build_id}/ro/oferta/{slug}.json"
+                    url = f"{self.base_url}/_next/data/{self.build_id}/ro/oferta/{slug}.json"
                     response = await client.get(url, headers=self._headers())
                     if response.status_code in (404, 410, 500):
                         if not build_id_refreshed:
@@ -330,6 +332,15 @@ class DetailScraper:
                         continue
                     response.raise_for_status()
                     data = response.json()
+                    # Check if the listing is marked as "redirected" (i.e., no longer available)
+                    redirect_url = data.get("pageProps", {}).get("__N_REDIRECT", None)
+                    if redirect_url:
+                        logger.warning(f"[{listing_id}] Listing marked as redirected")
+                        response = await client.get(f"{self.base_url}/_next/data/{self.build_id}{redirect_url}.json", headers=self._headers())
+                        data = response.json()
+                        if data.get("pageProps", {}).get("__N_REDIRECT"):
+                            logger.warning(f"[{listing_id}] Double redirect — skipping")
+                            return None
                     self._write_detail(listing_id, data, pushed_up_at)
                     return data
                 except httpx.RequestError as e:

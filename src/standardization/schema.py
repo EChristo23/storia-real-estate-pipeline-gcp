@@ -15,10 +15,15 @@ LISTING_SCHEMA = [
     bigquery.SchemaField("scrape_date",   "DATE",   mode="REQUIRED"),
 
     # --- identifiers / slugs ---
-    bigquery.SchemaField("slug",        "STRING", mode="NULLABLE"),
+    bigquery.SchemaField("url",        "STRING", mode="NULLABLE"),
     bigquery.SchemaField("external_id", "STRING", mode="NULLABLE"),  # unifiedAd.source.externalId
     bigquery.SchemaField("source_id",   "STRING", mode="NULLABLE"),  # unifiedAd.source.id
     bigquery.SchemaField("source_type", "STRING", mode="NULLABLE"),  # unifiedAd.source.sourceType
+    bigquery.SchemaField("source_type_name", "STRING", mode="NULLABLE"),  # unifiedAd.source.__typename
+
+    # --- advertiser ---
+    bigquery.SchemaField("advertiser_type",   "STRING", mode="NULLABLE"),
+    bigquery.SchemaField("advert_type",   "STRING", mode="NULLABLE"),
 
     # --- content ---
     bigquery.SchemaField("title",       "STRING", mode="NULLABLE"),
@@ -27,8 +32,8 @@ LISTING_SCHEMA = [
     # --- price (unifiedAd.price.salePrice) ---
     bigquery.SchemaField("price",         "FLOAT",   mode="NULLABLE"),
     bigquery.SchemaField("currency",      "STRING",  mode="NULLABLE"),
-    bigquery.SchemaField("is_negotiable", "BOOLEAN", mode="NULLABLE"),
-    bigquery.SchemaField("price_per_m",   "STRING",  mode="NULLABLE"),  # unifiedAd.attributes.price_per_m
+    bigquery.SchemaField("is_negotiable", "BOOLEAN", mode="NULLABLE"),  # apartament only (?)
+    # bigquery.SchemaField("price_per_m",   "STRING",  mode="NULLABLE"),  # unifiedAd.attributes.price_per_m
 
     # --- area ---
     bigquery.SchemaField("area",          "STRING", mode="NULLABLE"),  # unifiedAd.attributes.m
@@ -65,6 +70,7 @@ LISTING_SCHEMA = [
     bigquery.SchemaField("extras_types",    "STRING", mode="REPEATED"),
     bigquery.SchemaField("garage_types",    "STRING", mode="REPEATED"),
     bigquery.SchemaField("media_types",     "STRING", mode="REPEATED"),
+    bigquery.SchemaField("fence_types",     "STRING", mode="REPEATED"),  # casa
     bigquery.SchemaField("security_types",  "STRING", mode="REPEATED"),  # apartament
 
     # --- location (unifiedAd.location) ---

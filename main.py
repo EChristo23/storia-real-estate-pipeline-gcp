@@ -9,8 +9,9 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
-from src.ingestion.scraper import Scrapper, DetailScraper
 from src import config
+from src.ingestion.scraper import DetailScraper, Scrapper
+from src.standardization.transformer import Transformer
 
 load_dotenv()
 
@@ -51,9 +52,9 @@ def _setup_logging():
     logging.basicConfig(level=logging.INFO, handlers=handlers)
 
 
-async def run_scraper(prop_type: str, n_pages: int, bucket_name: str):
+async def run_scraper(prop_type: str, n_pages: int, bucket_name: str, base_url: str):
     logger = logging.getLogger(__name__)
-    scraper = Scrapper(type=prop_type, n_pages=n_pages)
+    scraper = Scrapper(type=prop_type, n_pages=n_pages, base_url=base_url)
     logger.info(f"Starting scraper for '{prop_type}'")
     scraper.setup()
     if not scraper.build_id:
@@ -64,9 +65,10 @@ async def run_scraper(prop_type: str, n_pages: int, bucket_name: str):
     logger.info(f"Scrape complete — {len(results)}/{scraper.n_pages} pages fetched")
 
 
-async def run_detail_scraper(prop_type: str, bucket_name: str):
+
+async def run_detail_scraper(prop_type: str, bucket_name: str, base_url: str):
     logger = logging.getLogger(__name__)
-    scraper = DetailScraper(type=prop_type)
+    scraper = DetailScraper(type=prop_type, base_url=base_url)
     logger.info(f"Starting detail scraper for '{prop_type}'")
     scraper.setup()
     if not scraper.build_id:
@@ -77,23 +79,36 @@ async def run_detail_scraper(prop_type: str, bucket_name: str):
     logger.info(f"Enrichment complete — {len(results)} listings fetched for '{prop_type}'")
 
 
+def run_transformer(prop_type: str, cfg: dict):
+    logger = logging.getLogger(__name__)
+    transformer = Transformer(config=cfg, type=prop_type)
+    logger.info(f"Starting transformer for '{prop_type}'")
+    transformer.transform()
+    logger.info(f"Transformation complete for '{prop_type}'")
+
+
 async def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--stage", type=int, choices=[1, 2], help="Run only stage 1 or stage 2 (default: both)")
+    parser.add_argument("--stage", type=int, choices=[1, 2, 3], nargs="+", help="Stages to run (e.g. --stage 1 2). Default: all.")
     args = parser.parse_args()
 
     _setup_logging()
     cfg = config.load()
     n_pages = cfg["scraping"].get("n_pages")
-    bucket_name = cfg["scraping"]["raw_bucket"]
+    bucket_name = cfg["gcs"]["raw_bucket"]
 
-    if not args.stage or args.stage == 1:
+    # Ingestion stages:
+    if not args.stage or 1 in args.stage:
         for prop_type in cfg["scraping"]["property_types"]:
-            await run_scraper(prop_type, n_pages=n_pages, bucket_name=bucket_name)
+            await run_scraper(prop_type, n_pages=n_pages, bucket_name=bucket_name, base_url=cfg["scraping"]["base_url"])
 
-    if not args.stage or args.stage == 2:
+    if not args.stage or 2 in args.stage:
         for prop_type in cfg["scraping"]["property_types"]:
-            await run_detail_scraper(prop_type, bucket_name=bucket_name)
+            await run_detail_scraper(prop_type, bucket_name=bucket_name, base_url=cfg["scraping"]["base_url"])
+
+    if not args.stage or 3 in args.stage:
+        for prop_type in cfg["scraping"]["property_types"]:
+            run_transformer(prop_type, cfg=cfg)
 
 
 if __name__ == "__main__":
