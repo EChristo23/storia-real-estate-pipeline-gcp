@@ -337,7 +337,11 @@ class DetailScraper:
                     if redirect_url:
                         logger.warning(f"[{listing_id}] Listing marked as redirected")
                         response = await client.get(f"{self.base_url}/_next/data/{self.build_id}{redirect_url}.json", headers=self._headers())
-                        data = response.json()
+                        try:
+                            data = response.json()
+                        except json.JSONDecodeError as e:
+                            logger.warning(f"[{listing_id}] Redirect target returned non-JSON response: {e} — skipping")
+                            return None
                         if data.get("pageProps", {}).get("__N_REDIRECT"):
                             logger.warning(f"[{listing_id}] Double redirect — skipping")
                             return None

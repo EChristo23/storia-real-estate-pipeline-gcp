@@ -1,5 +1,7 @@
 
 from concurrent.futures import ThreadPoolExecutor, as_completed
+import ctypes
+import gc
 import json
 import logging
 
@@ -44,23 +46,25 @@ class Transformer:
         result = query_job.result()
         try:
             row = next(iter(result))
-            return row['last_scrape_date']
+            return str(row['last_scrape_date'])
         except StopIteration:
             return None
 
 
-    def get_blobs(self, max_date = '2026-01-01', prefix = "detail/"):
-        '''Reads a from the raw bucket and returns a list of blob names that have a date greater than the specified max_date.'''
+    def get_dates(self, min_date = '2026-01-01', prefix = "detail/"):
+        '''Returns the scrape dates (subdirectories) under the type/prefix path that are greater than min_date, sorted ascending.'''
         if self.bucket is None:
-            raise ValueError("Bucket is not set. Please call set_bucket() before calling get_blobs().")
-        bucket = self.bucket
-        blobs = bucket.list_blobs(prefix=f"{self.type}/{prefix}")
-        blobs_selection = []
-        for blob in blobs:
-            data = blob.name.split("/")
-            if data[-2] > max_date:
-                blobs_selection.append(blob.name)
-        return blobs_selection
+            raise ValueError("Bucket is not set. Please call set_bucket() before calling get_dates().")
+        iterator = self.bucket.list_blobs(prefix=f"{self.type}/{prefix}", delimiter="/")
+        list(iterator)  # exhaust the iterator so .prefixes gets populated
+        dates = [p.rstrip("/").split("/")[-1] for p in iterator.prefixes]
+        return sorted(date for date in dates if date > min_date)
+
+    def get_blobs_for_date(self, date: str, prefix = "detail/") -> list[str]:
+        '''Returns the list of blob names for a single scrape date.'''
+        if self.bucket is None:
+            raise ValueError("Bucket is not set. Please call set_bucket() before calling get_blobs_for_date().")
+        return [blob.name for blob in self.bucket.list_blobs(prefix=f"{self.type}/{prefix}{date}/")]
     
     def read_blob(self, blob_name: str) -> dict:
         '''Reads the content of a blob from the raw bucket.'''
@@ -181,6 +185,27 @@ class Transformer:
         return listing, contact
 
 
+    def fetch_and_transform(self, blob_names: list[str]) -> tuple[list[dict], list[dict]]:
+        '''Downloads and transforms a batch of blobs concurrently. Returns (listing_rows, contact_rows).'''
+        listings_list = []
+        contacts_list = []
+        with ThreadPoolExecutor(max_workers=20) as executor:
+            futures = {executor.submit(self.read_blob, name): name for name in blob_names}
+            for future in as_completed(futures):
+                blob_name = futures[future]
+                try:
+                    blob_content = future.result()
+                    listing_row, contact_row = self.transform_blob(blob_name, blob_content)
+                    listings_list.append(listing_row)
+                    contacts_list.append(contact_row)
+                except (json.JSONDecodeError, KeyError, GoogleAPIError) as e:
+                    # TODO: analyze blob structure at fetch time in the detail scraper
+                    # and route unrecognized/malformed blobs to a dead-letter GCS prefix
+                    # (e.g. casa/detail/unprocessable/) instead of silently skipping here
+                    logger.warning("Skipping blob %s: %s", blob_name, e)
+        return listings_list, contacts_list
+
+
     def write_rows(self, table_name: str, rows: list[dict], partition_size: int = 500) -> None:
         '''Writes a list of rows to the specified BigQuery table.'''
         if self.bigquery_client is None:
@@ -194,18 +219,17 @@ class Transformer:
             
 
     def write_watermark(self, table_name: str, scrape_date: str) -> None:
-        '''Upserts the watermark row for self.type. Deletes any existing row first, then inserts.'''
+        '''Upserts the watermark row for self.type via a MERGE query job.
+        (A streaming insert followed by DML would fail while the row sits in the streaming buffer.)'''
         if self.bigquery_client is None:
             self.set_bigquery_client()
-        self.bigquery_client.query(
-            f"DELETE FROM `{table_name}` WHERE property_type = '{self.type}'"
-        ).result()
-        errors = self.bigquery_client.insert_rows_json(
-            self.bigquery_client.get_table(table_name),
-            [{'property_type': self.type, 'last_scrape_date': scrape_date}],
-        )
-        if errors:
-            raise RuntimeError(f"Watermark write failed: {errors}")
+        self.bigquery_client.query(f'''
+            MERGE `{table_name}` T
+            USING (SELECT '{self.type}' AS property_type, DATE('{scrape_date}') AS last_scrape_date) S
+            ON T.property_type = S.property_type
+            WHEN MATCHED THEN UPDATE SET last_scrape_date = S.last_scrape_date
+            WHEN NOT MATCHED THEN INSERT (property_type, last_scrape_date) VALUES (S.property_type, S.last_scrape_date)
+        ''').result()
 
     def transform(self):
         # Set up clients and bucket
@@ -225,37 +249,30 @@ class Transformer:
             logger.info(f"No watermark found for property type '{self.type}'. Processing all blobs.")
             watermark_date = '2026-01-01'  # Default to a very old date if no watermark exists
 
-        # Get the list of blobs to process
-        blobs_list = self.get_blobs(max_date=watermark_date, prefix="detail/")
-        listings_list = []
-        contacts_list = []
-        with ThreadPoolExecutor(max_workers=20) as executor:
-            futures = {executor.submit(self.read_blob, name): name for name in blobs_list}
-            for future in as_completed(futures):
-                blob_name = futures[future]
-                try:
-                    blob_content = future.result()
-                    listing_row, contact_row = self.transform_blob(blob_name, blob_content)
-                    listings_list.append(listing_row)
-                    contacts_list.append(contact_row)
-                except (json.JSONDecodeError, KeyError, GoogleAPIError) as e:
-                    # TODO: analyze blob structure at fetch time in the detail scraper
-                    # and route unrecognized/malformed blobs to a dead-letter GCS prefix
-                    # (e.g. casa/detail/unprocessable/) instead of silently skipping here
-                    logger.warning("Skipping blob %s: %s", blob_name, e)
-        
-        # Write the transformed rows to BigQuery
-        if listings_list:
-            self.write_rows(table_name=listings_table, rows=listings_list, partition_size=PARTITION_SIZE)
-        if contacts_list:
-            self.write_rows(table_name=contacts_table, rows=contacts_list, partition_size=PARTITION_SIZE)
-
-        # Update the watermark with the latest scrape date
-        if blobs_list:
-            latest_scrape_date = max(blob_name.split("/")[-2] for blob_name in blobs_list)
-            self.write_watermark(table_name=watermark_table, scrape_date=latest_scrape_date)
-            logger.info(f"Transformation complete for property type '{self.type}'. Processed {len(listings_list)} listings and {len(contacts_list)} contacts. Updated watermark to {latest_scrape_date}.")
-        else:
+        # Get the scrape dates to process, oldest first
+        dates = self.get_dates(min_date=watermark_date, prefix="detail/")
+        if not dates:
             logger.info(f"No new blobs found for '{self.type}'.")
+            return
+
+        # Process one day at a time, writing and advancing the watermark after each day
+        for scrape_date in dates:
+            blob_names = self.get_blobs_for_date(scrape_date, prefix="detail/")
+            listings_list, contacts_list = self.fetch_and_transform(blob_names)
+
+            if listings_list:
+                self.write_rows(table_name=listings_table, rows=listings_list, partition_size=PARTITION_SIZE)
+            if contacts_list:
+                self.write_rows(table_name=contacts_table, rows=contacts_list, partition_size=PARTITION_SIZE)
+
+            self.write_watermark(table_name=watermark_table, scrape_date=scrape_date)
+            logger.info(f"Processed '{scrape_date}' for '{self.type}': {len(listings_list)} listings, {len(contacts_list)} contacts. Watermark advanced to {scrape_date}.")
+
+            # Release the day's buffers back to the OS before starting the next day —
+            # glibc otherwise keeps freed heap memory reserved for reuse rather than returning it,
+            # so RSS would keep climbing across days instead of resetting.
+            del listings_list, contacts_list
+            gc.collect()
+            ctypes.CDLL("libc.so.6").malloc_trim(0)
 
     
