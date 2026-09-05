@@ -1,0 +1,16 @@
+name: 'storia_real_estate'
+version: '1.0.0'
+config-version: 2
+
+profile: 'storia_real_estate'
+
+model-paths: ["models"]
+target-path: "target"
+clean-targets:
+  - "target"
+  - "dbt_packages"
+
+models:
+  storia_real_estate:
+    curated:
+      +materialized: table

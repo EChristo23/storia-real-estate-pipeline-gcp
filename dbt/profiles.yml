@@ -1,0 +1,10 @@
+storia_real_estate:
+  target: dev
+  outputs:
+    dev:
+      type: bigquery
+      method: oauth
+      project: real-estate-465112
+      dataset: curated
+      location: EU
+      threads: 4

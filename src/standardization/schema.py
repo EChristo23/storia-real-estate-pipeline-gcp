@@ -111,3 +111,11 @@ WATERMARK_SCHEMA = [
     bigquery.SchemaField("property_type",    "STRING", mode="REQUIRED"),
     bigquery.SchemaField("last_scrape_date", "DATE",   mode="REQUIRED"),
 ]
+
+# Which listings were present in the most recent stage-1 (list-page) scrape.
+# Fully replaced on every stage-1 run — no history is kept here; the curated
+# layer uses it purely to flag listings as active/inactive.
+LISTING_PRESENCE_SCHEMA = [
+    bigquery.SchemaField("listing_id", "STRING", mode="REQUIRED"),
+    bigquery.SchemaField("date",       "DATE",   mode="REQUIRED"),
+]

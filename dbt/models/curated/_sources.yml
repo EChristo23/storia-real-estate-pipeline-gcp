@@ -1,0 +1,10 @@
+version: 2
+
+sources:
+  - name: standardized
+    project: real-estate-465112
+    dataset: standardized
+    tables:
+      - name: listings
+      - name: contacts
+      - name: listing_presence

@@ -3,6 +3,7 @@ import asyncio
 import json
 import logging
 import os
+import subprocess
 import sys
 from logging.handlers import TimedRotatingFileHandler
 from pathlib import Path
@@ -11,9 +12,12 @@ from dotenv import load_dotenv
 
 from src import config
 from src.ingestion.scraper import DetailScraper, Scrapper
+from src.standardization.loader import PresenceLoader
 from src.standardization.transformer import Transformer
 
 load_dotenv()
+
+DBT_PROJECT_DIR = Path(__file__).parent / "dbt"
 
 
 def _setup_logging():
@@ -87,9 +91,32 @@ def run_transformer(prop_type: str, cfg: dict):
     logger.info(f"Transformation complete for '{prop_type}'")
 
 
+def run_presence_loader(cfg: dict):
+    logger = logging.getLogger(__name__)
+    bq = cfg["bigquery"]
+    table_name = f"{bq['project']}.{bq['dataset']}.{bq['listing_presence_table']}"
+    logger.info("Rebuilding listing_presence from the latest stage-1 run")
+    loader = PresenceLoader(config=cfg)
+    loader.load(property_types=cfg["scraping"]["property_types"], table_name=table_name)
+    logger.info("listing_presence rebuild complete")
+
+
+def run_curation():
+    logger = logging.getLogger(__name__)
+    logger.info("Starting dbt curation run")
+    try:
+        subprocess.run(
+            ["dbt", "run", "--project-dir", str(DBT_PROJECT_DIR), "--profiles-dir", str(DBT_PROJECT_DIR)],
+            check=True,
+        )
+        logger.info("Curation complete")
+    except subprocess.CalledProcessError as e:
+        logger.critical(f"dbt run failed with exit code {e.returncode}")
+
+
 async def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--stage", type=int, choices=[1, 2, 3], nargs="+", help="Stages to run (e.g. --stage 1 2). Default: all.")
+    parser.add_argument("--stage", type=int, choices=[1, 2, 3, 4], nargs="+", help="Stages to run (e.g. --stage 1 2). Default: all.")
     args = parser.parse_args()
 
     _setup_logging()
@@ -101,6 +128,7 @@ async def main():
     if not args.stage or 1 in args.stage:
         for prop_type in cfg["scraping"]["property_types"]:
             await run_scraper(prop_type, n_pages=n_pages, bucket_name=bucket_name, base_url=cfg["scraping"]["base_url"])
+        run_presence_loader(cfg)
 
     if not args.stage or 2 in args.stage:
         for prop_type in cfg["scraping"]["property_types"]:
@@ -109,6 +137,9 @@ async def main():
     if not args.stage or 3 in args.stage:
         for prop_type in cfg["scraping"]["property_types"]:
             run_transformer(prop_type, cfg=cfg)
+
+    if not args.stage or 4 in args.stage:
+        run_curation()
 
 
 if __name__ == "__main__":
