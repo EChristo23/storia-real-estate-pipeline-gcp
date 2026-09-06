@@ -112,6 +112,7 @@ def run_curation():
         logger.info("Curation complete")
     except subprocess.CalledProcessError as e:
         logger.critical(f"dbt run failed with exit code {e.returncode}")
+        raise RuntimeError(f"dbt run failed with exit code {e.returncode}") from e
 
 
 async def main():
