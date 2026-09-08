@@ -82,7 +82,7 @@ class Scrapper:
             for attempt in range(_MAX_RETRIES):
                 try:
                     response = await client.get(url, headers=self._headers())
-                    if response.status_code in (429, 403, 500, 503):
+                    if response.status_code in (429, 403, 500, 502, 503, 504):
                         wait = _BACKOFF_BASE * (2 ** attempt)
                         logger.warning(f"[page {page}] HTTP {response.status_code} — backing off {wait}s")
                         await asyncio.sleep(wait)
@@ -325,7 +325,7 @@ class DetailScraper:
                             continue
                         logger.warning(f"[{listing_id}] HTTP {response.status_code} after refresh — listing gone, skipping")
                         return None
-                    if response.status_code in (429, 403, 503):
+                    if response.status_code in (429, 403, 502, 503, 504):
                         wait = _BACKOFF_BASE * (2 ** attempt)
                         logger.warning(f"[{listing_id}] HTTP {response.status_code} — backing off {wait}s")
                         await asyncio.sleep(wait)
