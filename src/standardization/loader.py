@@ -9,9 +9,9 @@ logger = logging.getLogger(__name__)
 
 
 class PresenceLoader:
-    '''Rebuilds the listing_presence table from each property type's most recent
-    stage-1 (list-page) scrape. The table is fully replaced on every run — it
-    reflects only the latest run, not a history of past runs.'''
+    '''Upserts the listing_presence table from each property type's most recent
+    stage-1 (list-page) scrape: last_seen advances to today for listings still
+    present, and is left untouched for listings that stopped appearing.'''
 
     def __init__(self, config):
         self.config = config
@@ -48,28 +48,49 @@ class PresenceLoader:
         return list(summary.keys())
 
     def load(self, property_types: list[str], table_name: str) -> None:
-        '''Replaces the presence table with the latest stage-1 run's listing IDs for each property type.'''
+        '''Upserts last_seen for the latest stage-1 run's listing IDs across all property types.'''
         self.set_bucket()
         if self.bigquery_client is None:
             self.set_bigquery_client()
 
-        rows = []
+        # A listing_id can show up under more than one property type (e.g. cross-listed
+        # ads), so dedupe by id before the MERGE — it requires at most one source row
+        # per target row.
+        seen: dict[str, str] = {}
         for prop_type in property_types:
             date = self._latest_date(prop_type)
             if date is None:
                 logger.warning(f"No scrape dates found for '{prop_type}', skipping")
                 continue
             listing_ids = self._read_listing_ids(prop_type, date)
-            rows.extend({"listing_id": lid, "date": date} for lid in listing_ids)
+            for lid in listing_ids:
+                seen[lid] = max(date, seen[lid]) if lid in seen else date
             logger.info(f"'{prop_type}': {len(listing_ids)} listings present as of {date}")
 
-        job = self.bigquery_client.load_table_from_json(
+        if not seen:
+            logger.warning("No listings found across any property type; skipping presence update.")
+            return
+
+        rows = [{"listing_id": lid, "last_seen": date} for lid, date in seen.items()]
+
+        staging_table = f"{table_name}_staging"
+        load_job = self.bigquery_client.load_table_from_json(
             rows,
-            table_name,
+            staging_table,
             job_config=bigquery.LoadJobConfig(
                 write_disposition="WRITE_TRUNCATE",
                 schema=LISTING_PRESENCE_SCHEMA,
             ),
         )
-        job.result()
-        logger.info(f"listing_presence replaced with {len(rows)} rows across {len(property_types)} property type(s).")
+        load_job.result()
+
+        self.bigquery_client.query(f'''
+            MERGE `{table_name}` T
+            USING `{staging_table}` S
+            ON T.listing_id = S.listing_id
+            WHEN MATCHED THEN UPDATE SET last_seen = S.last_seen
+            WHEN NOT MATCHED THEN INSERT (listing_id, last_seen) VALUES (S.listing_id, S.last_seen)
+        ''').result()
+
+        self.bigquery_client.delete_table(staging_table, not_found_ok=True)
+        logger.info(f"listing_presence upserted with {len(rows)} listings seen across {len(property_types)} property type(s).")

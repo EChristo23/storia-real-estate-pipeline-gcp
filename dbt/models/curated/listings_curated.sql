@@ -6,6 +6,11 @@
 -- than scrape_date, since scrape_date only advances when a listing's content
 -- actually changes — an unchanged-but-still-live listing would otherwise look
 -- identical to a delisted one.
+--
+-- listing_presence holds one row per listing ever seen (last_seen advances
+-- while a listing keeps appearing, stays put once it stops) — so a listing is
+-- only active if its last_seen matches the most recent run, not merely if a
+-- row exists at all.
 
 with ranked as (
     select
@@ -18,11 +23,18 @@ latest as (
     select * except (rn)
     from ranked
     where rn = 1
+),
+
+most_recent_run as (
+    select max(last_seen) as last_seen
+    from {{ source('standardized', 'listing_presence') }}
 )
 
 select
     latest.*,
-    presence.listing_id is not null as is_active
+    presence.last_seen,
+    coalesce(presence.last_seen = most_recent_run.last_seen, false) as is_active
 from latest
 left join {{ source('standardized', 'listing_presence') }} as presence
     on latest.id = presence.listing_id
+cross join most_recent_run
