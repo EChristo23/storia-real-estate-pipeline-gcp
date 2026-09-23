@@ -24,9 +24,9 @@ Uses Storia.ro's Next.js `/_next/data/` endpoint to fetch paginated listing page
 - **BeautifulSoup + lxml** — HTML parsing for build ID extraction
 - **asyncio** — concurrent page fetching
 - **Google Cloud Storage** — Bronze layer landing zone
-- **BigQuery** — target analytical store (planned)
-- **Cloud Run** — deployment target (planned)
-- **dbt** — transformation layer (planned)
+- **BigQuery** — target analytical store
+- **Cloud Run** — deployment target
+- **dbt** — transformation layer
 
 ## Configuration
 
